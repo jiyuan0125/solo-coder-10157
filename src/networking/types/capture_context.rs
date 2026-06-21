@@ -161,10 +161,16 @@ impl CaptureType {
 
     pub fn resume(&mut self, filters: &Filters) {
         if let Self::Live(cap) = self {
+            let mut applied = false;
             if filters.is_some_filter_active() {
-                let _ = cap.filter(filters.bpf(), true).log_err(location!());
-            } else if cap.filter("", true).log_err(location!()).is_err() {
-                let _ = cap.filter("greater 0", true).log_err(location!());
+                if cap.filter(filters.bpf(), true).log_err(location!()).is_ok() {
+                    applied = true;
+                }
+            }
+            if !applied {
+                if cap.filter("", true).log_err(location!()).is_err() {
+                    let _ = cap.filter("greater 0", true).log_err(location!());
+                }
             }
         }
     }

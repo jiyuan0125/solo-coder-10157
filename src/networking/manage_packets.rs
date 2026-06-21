@@ -349,16 +349,22 @@ fn get_traffic_direction(
     dest_port: Option<u16>,
     my_interface_addresses: &[Address],
 ) -> TrafficDirection {
-    // first let's handle TCP and UDP loopback
-    if source_ip.is_loopback()
-        && destination_ip.is_loopback()
-        && let (Some(sport), Some(dport)) = (source_port, dest_port)
-    {
-        return if sport > dport {
-            TrafficDirection::Outgoing
-        } else {
-            TrafficDirection::Incoming
-        };
+    if source_ip.is_loopback() && destination_ip.is_loopback() {
+        if let (Some(sport), Some(dport)) = (source_port, dest_port) {
+            let sport_well_known = sport < 1024;
+            let dport_well_known = dport < 1024;
+            return match (sport_well_known, dport_well_known) {
+                (true, false) => TrafficDirection::Outgoing,
+                (false, true) => TrafficDirection::Incoming,
+                _ => {
+                    if dport <= sport {
+                        TrafficDirection::Incoming
+                    } else {
+                        TrafficDirection::Outgoing
+                    }
+                }
+            };
+        }
     }
 
     // if interface_addresses is empty, check if the IP is a bogon (useful when importing pcap files)
