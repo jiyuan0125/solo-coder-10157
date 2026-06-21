@@ -32,7 +32,7 @@ impl CaptureContext {
         }
 
         let cap = match cap_type {
-            CaptureType::Live(cap) => cap,
+            CaptureType::Live { cap, last_valid_bpf: _ } => cap,
             CaptureType::Offline(cap) => return Self::new_offline(cap),
         };
 
@@ -71,10 +71,14 @@ impl CaptureContext {
 
     pub fn consume(self) -> (Option<CaptureType>, Option<Savefile>) {
         match self {
-            Self::Live(on) => (Some(CaptureType::Live(on.cap)), None),
-            Self::LiveWithSavefile(onws) => {
-                (Some(CaptureType::Live(onws.live.cap)), Some(onws.savefile))
-            }
+            Self::Live(on) => (
+                Some(CaptureType::Live { cap: on.cap, last_valid_bpf: String::new() }),
+                None,
+            ),
+            Self::LiveWithSavefile(onws) => (
+                Some(CaptureType::Live { cap: onws.live.cap, last_valid_bpf: String::new() }),
+                Some(onws.savefile),
+            ),
             Self::Offline(off) => (Some(CaptureType::Offline(off.cap)), None),
             Self::Error(_) => (None, None),
         }
@@ -106,21 +110,21 @@ pub struct Offline {
 }
 
 pub enum CaptureType {
-    Live(Capture<Active>),
+    Live { cap: Capture<Active>, last_valid_bpf: String },
     Offline(Capture<pcap::Offline>),
 }
 
 impl CaptureType {
     pub fn next_packet(&mut self) -> Result<Packet<'_>, Error> {
         match self {
-            Self::Live(on) => on.next_packet(),
+            Self::Live { cap, .. } => cap.next_packet(),
             Self::Offline(off) => off.next_packet(),
         }
     }
 
     pub fn stats(&mut self) -> Result<Stat, Error> {
         match self {
-            Self::Live(on) => on.stats(),
+            Self::Live { cap, .. } => cap.stats(),
             Self::Offline(off) => off.stats(),
         }
     }
@@ -140,7 +144,7 @@ impl CaptureType {
                     .immediate_mode(false)
                     .timeout(150) // ensure UI is updated even if no packets are captured
                     .open()?;
-                Ok(Self::Live(cap))
+                Ok(Self::Live { cap, last_valid_bpf: String::new() })
             }
             CaptureSource::File(file) => Ok(Self::Offline(Capture::from_file(&file.path)?)),
         }
@@ -148,27 +152,56 @@ impl CaptureType {
 
     fn set_bpf(&mut self, bpf: &str) -> Result<(), Error> {
         match self {
-            Self::Live(cap) => cap.filter(bpf, true),
+            Self::Live { cap, last_valid_bpf } => {
+                cap.filter(bpf, true)?;
+                *last_valid_bpf = bpf.to_string();
+                Ok(())
+            }
             Self::Offline(cap) => cap.filter(bpf, true),
         }
     }
 
     pub fn pause(&mut self) {
-        if let Self::Live(cap) = self {
+        if let Self::Live { cap, .. } = self {
             let _ = cap.filter("less 2", true).log_err(location!());
         }
     }
 
     pub fn resume(&mut self, filters: &Filters) {
-        if let Self::Live(cap) = self {
+        if let Self::Live { cap, last_valid_bpf } = self {
             let mut applied = false;
             if filters.is_some_filter_active() {
-                if cap.filter(filters.bpf(), true).log_err(location!()).is_ok() {
-                    applied = true;
+                match cap.filter(filters.bpf(), true) {
+                    Ok(()) => {
+                        *last_valid_bpf = filters.bpf().to_string();
+                        applied = true;
+                    }
+                    Err(e) => {
+                        let loc = location!();
+                        eprintln!(
+                            "Sniffnet error at [{}:{}]: {}",
+                            loc.file, loc.line, e
+                        );
+                        #[cfg(debug_assertions)]
+                        {
+                            let _ = cap.filter(last_valid_bpf, true);
+                            panic!();
+                        }
+                        #[cfg(not(debug_assertions))]
+                        {
+                            if cap.filter(last_valid_bpf, true).log_err(location!()).is_ok() {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
             if !applied {
-                if cap.filter("", true).log_err(location!()).is_err() {
+                if cap.filter("", true).log_err(location!()).is_ok() {
+                    *last_valid_bpf = String::new();
+                } else if cap.filter(last_valid_bpf, true).log_err(location!()).is_ok() {
+                    // keep last_valid_bpf unchanged
+                } else {
                     let _ = cap.filter("greater 0", true).log_err(location!());
                 }
             }

@@ -167,10 +167,7 @@ pub fn parse_packets(
                         continue;
                     };
 
-                    let captured_len = packet.data.len() as u128;
-                    if exchanged_bytes > captured_len {
-                        exchanged_bytes = captured_len;
-                    }
+                    exchanged_bytes = packet.data.len() as u128;
 
                     // save this packet to PCAP file
                     if let Some(file) = savefile.as_mut() {

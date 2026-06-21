@@ -9,7 +9,6 @@ use pcap::Address;
 use crate::Protocol;
 use crate::networking::types::address_port_pair::AddressPortPair;
 use crate::networking::types::arp_type::ArpType;
-use crate::networking::types::bogon::is_bogon;
 use crate::networking::types::capture_context::CaptureSource;
 use crate::networking::types::icmp_type::{IcmpType, IcmpTypeV4, IcmpTypeV6};
 use crate::networking::types::info_address_port_pair::InfoAddressPortPair;
@@ -284,6 +283,7 @@ pub fn modify_or_insert_in_map(
             key.sport,
             key.dport,
             my_interface_addresses,
+            key.protocol,
         );
         // determine upper layer service
         service = get_service(key, traffic_direction, my_interface_addresses);
@@ -348,44 +348,67 @@ fn get_traffic_direction(
     source_port: Option<u16>,
     dest_port: Option<u16>,
     my_interface_addresses: &[Address],
+    protocol: Protocol,
 ) -> TrafficDirection {
     if source_ip.is_loopback() && destination_ip.is_loopback() {
         if let (Some(sport), Some(dport)) = (source_port, dest_port) {
             let sport_well_known = sport < 1024;
             let dport_well_known = dport < 1024;
+
             return match (sport_well_known, dport_well_known) {
-                (true, false) => TrafficDirection::Outgoing,
-                (false, true) => TrafficDirection::Incoming,
+                (true, false) => TrafficDirection::Incoming,
+                (false, true) => TrafficDirection::Outgoing,
                 _ => {
-                    if dport <= sport {
+                    let unknown = Service::Unknown;
+                    let service_sport = SERVICES
+                        .get(&ServiceQuery(sport, protocol))
+                        .unwrap_or(&unknown);
+                    let service_dport = SERVICES
+                        .get(&ServiceQuery(dport, protocol))
+                        .unwrap_or(&unknown);
+
+                    let score_sport = {
+                        let has_name = u8::from(matches!(service_sport, Service::Name(_)));
+                        let port_weight = if sport < 1024 { 3 } else { 1 };
+                        has_name * port_weight
+                    };
+                    let score_dport = {
+                        let has_name = u8::from(matches!(service_dport, Service::Name(_)));
+                        let port_weight = if dport < 1024 { 3 } else { 1 };
+                        has_name * port_weight
+                    };
+
+                    if score_dport > score_sport {
+                        TrafficDirection::Outgoing
+                    } else if score_sport > score_dport {
+                        TrafficDirection::Incoming
+                    } else if dport < sport {
+                        TrafficDirection::Outgoing
+                    } else if sport < dport {
                         TrafficDirection::Incoming
                     } else {
-                        TrafficDirection::Outgoing
+                        TrafficDirection::Incoming
                     }
                 }
             };
         }
     }
 
-    // if interface_addresses is empty, check if the IP is a bogon (useful when importing pcap files)
     let is_local = |ip: &IpAddr| -> bool {
         if my_interface_addresses.is_empty() {
-            is_bogon(ip).is_some()
+            false
         } else {
             my_interface_addresses.iter().any(|a| a.addr == *ip)
         }
     };
 
     if is_local(source_ip) {
-        // source is local
         TrafficDirection::Outgoing
     } else if source_ip.ne(&IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         && source_ip.ne(&IpAddr::V6(Ipv6Addr::UNSPECIFIED))
     {
-        // source not local and different from 0.0.0.0 and different from ::
         TrafficDirection::Incoming
     } else if !is_local(destination_ip) {
-        // source is 0.0.0.0 or :: (local not yet assigned an IP) and destination is not local
         TrafficDirection::Outgoing
     } else {
         TrafficDirection::Incoming
@@ -678,6 +701,7 @@ mod tests {
             Some(99),
             Some(99),
             &address_vec,
+            Protocol::TCP,
         );
         assert_eq!(result1, TrafficDirection::Outgoing);
         let result2 = get_traffic_direction(
@@ -686,6 +710,7 @@ mod tests {
             Some(99),
             Some(99),
             &address_vec,
+            Protocol::TCP,
         );
         assert_eq!(result2, TrafficDirection::Incoming);
         let result3 = get_traffic_direction(
@@ -694,6 +719,7 @@ mod tests {
             Some(99),
             Some(99),
             &address_vec,
+            Protocol::TCP,
         );
         assert_eq!(result3, TrafficDirection::Outgoing);
         let result4 = get_traffic_direction(
@@ -702,6 +728,7 @@ mod tests {
             Some(99),
             Some(99),
             &address_vec,
+            Protocol::TCP,
         );
         assert_eq!(result4, TrafficDirection::Incoming);
         let result4 = get_traffic_direction(
@@ -710,6 +737,7 @@ mod tests {
             Some(99),
             Some(99),
             &address_vec,
+            Protocol::TCP,
         );
         assert_eq!(result4, TrafficDirection::Outgoing);
     }
