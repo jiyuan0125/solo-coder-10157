@@ -382,14 +382,59 @@ fn get_traffic_direction(
                         TrafficDirection::Outgoing
                     } else if score_sport > score_dport {
                         TrafficDirection::Incoming
-                    } else if dport < sport {
-                        TrafficDirection::Outgoing
                     } else if sport < dport {
+                        TrafficDirection::Outgoing
+                    } else if dport < sport {
                         TrafficDirection::Incoming
                     } else {
                         TrafficDirection::Incoming
                     }
                 }
+            };
+        }
+    }
+
+    if my_interface_addresses.is_empty() {
+        let is_private_ip = |ip: &IpAddr| -> bool {
+            match ip {
+                IpAddr::V4(v4) => {
+                    let octets = v4.octets();
+                    match octets[0] {
+                        10 => true,
+                        172 if octets[1] >= 16 && octets[1] <= 31 => true,
+                        192 if octets[1] == 168 => true,
+                        169 if octets[1] == 254 => true,
+                        _ => false,
+                    }
+                }
+                IpAddr::V6(v6) => {
+                    let segments = v6.segments();
+                    (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfe80
+                }
+            }
+        };
+
+        let src_priv = is_private_ip(source_ip);
+        let dst_priv = is_private_ip(destination_ip);
+
+        let local_anchor: Option<&IpAddr> = match (src_priv, dst_priv) {
+            (true, true) => {
+                if source_ip < destination_ip {
+                    Some(source_ip)
+                } else {
+                    Some(destination_ip)
+                }
+            }
+            (true, false) => Some(source_ip),
+            (false, true) => Some(destination_ip),
+            (false, false) => None,
+        };
+
+        if let Some(anchor) = local_anchor {
+            return if source_ip == anchor {
+                TrafficDirection::Outgoing
+            } else {
+                TrafficDirection::Incoming
             };
         }
     }
